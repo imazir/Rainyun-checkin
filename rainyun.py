@@ -376,6 +376,137 @@ class DingTalkProvider(NotificationProvider):
             logging.error(f"Error sending DingTalk notification: {e}")
             return False
 
+class BarkProvider(NotificationProvider):
+    """Bark 推送渠道（iOS，https://bark.day.app）
+
+    Bark 走 APNs，单条推送载荷有硬上限：bark-server 中 apns.PayloadMaximum = 4096 字节。
+    超出会被服务端/APNs 拒收，因此这里按「整包体积」动态裁剪正文，而不是只按正文字节数裁剪。
+    """
+    # 正文首选预算（整包还会再校验一次，见 _shrink_to_fit）
+    MAX_BYTES = 3000
+    # 整包（含 title/group/icon 等字段 + JSON 转义开销）的硬上限，留出余量
+    PAYLOAD_MAX_BYTES = 3800
+    CONTENT_KEYS = ['markdown_full', 'markdown_lite', 'summary_markdown']
+
+    def __init__(self, key, server=None, group=None, level=None, sound=None,
+                 icon=None, click_url=None):
+        self.server, self.key = self._parse_target(key, server)
+        self.group = group
+        self.level = level
+        self.sound = sound
+        self.icon = icon
+        self.click_url = click_url
+
+    @staticmethod
+    def _parse_target(key, server):
+        """兼容三种填法：
+        1) 只填 device key            -> 使用 server（默认 https://api.day.app）
+        2) 填 APP 里复制的完整推送 URL -> 自动解析出服务器与 key
+        3) 自建服务器 + key            -> BARK_SERVER 指向自建地址
+        """
+        import urllib.parse
+
+        default_server = (server or "https://api.day.app").strip().rstrip("/") or "https://api.day.app"
+        raw = (key or "").strip()
+
+        if raw.startswith(("http://", "https://")):
+            parsed = urllib.parse.urlsplit(raw)
+            segments = [seg for seg in parsed.path.split("/") if seg]
+            derived_key = segments[-1] if segments else ""
+            base = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            return base, derived_key
+
+        return default_server, raw
+
+    def _masked_key(self):
+        """device key 等同于推送凭证，日志中只保留片段"""
+        if len(self.key) <= 6:
+            return "***"
+        return f"{self.key[:4]}***{self.key[-2:]}"
+
+    def _build_payload(self, title, content):
+        payload = {
+            "device_key": self.key,
+            "title": title,
+            "body": content,
+        }
+        # 可选字段：留空则不下发，避免用空值覆盖 Bark 服务端默认行为
+        if self.group:
+            payload["group"] = self.group
+        if self.level:
+            payload["level"] = self.level
+        if self.sound:
+            payload["sound"] = self.sound
+        if self.icon:
+            payload["icon"] = self.icon
+        if self.click_url:
+            payload["url"] = self.click_url
+        return payload
+
+    @staticmethod
+    def _payload_size(payload):
+        import json
+        return len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+
+    def _shrink_to_fit(self, payload):
+        """按 APNs 4096 字节上限收缩正文，宁可少发也不能整条被拒收"""
+        body = payload.get('body', '')
+        if self._payload_size(payload) <= self.PAYLOAD_MAX_BYTES:
+            return payload
+
+        for budget in (2400, 1800, 1200, 800, 400):
+            candidate = dict(payload)
+            candidate['body'] = self._safe_truncate(body, budget)
+            if self._payload_size(candidate) <= self.PAYLOAD_MAX_BYTES:
+                logging.warning(
+                    f"Bark: 推送内容超出 APNs 上限，正文已压缩到 {budget} 字节以内"
+                )
+                return candidate
+
+        # 极端兜底：字段过多时只保留一小段摘要
+        payload = dict(payload)
+        payload['body'] = self._safe_truncate(body, 200)
+        logging.warning("Bark: 推送内容严重超限，已降级为极简摘要")
+        return payload
+
+    def send(self, title, context):
+        import requests
+
+        if not self.key:
+            logging.error("Bark: 未配置 BARK_KEY，跳过推送")
+            return False
+
+        if self.server.startswith("http://"):
+            logging.warning("Bark: 服务端使用明文 HTTP，推送内容可被中间人读取，建议改用 HTTPS")
+
+        content = self.select_content(context)
+        payload = self._shrink_to_fit(self._build_payload(title, content))
+
+        url = f"{self.server}/push"
+        try:
+            logging.info(
+                f"Sending Bark notification: {title} "
+                f"(key {self._masked_key()}, "
+                f"body {len(payload.get('body', '').encode('utf-8'))} bytes, "
+                f"payload {self._payload_size(payload)} bytes)"
+            )
+            response = requests.post(url, json=payload, timeout=30)
+            try:
+                result = response.json()
+            except ValueError:
+                result = {}
+            if response.status_code == 200 and result.get('code') == 200:
+                logging.info("Bark notification sent successfully")
+                return True
+            logging.error(
+                f"Bark notification failed: HTTP {response.status_code} "
+                f"{result.get('message', response.text[:100])}"
+            )
+            return False
+        except Exception as e:
+            logging.error(f"Error sending Bark notification: {e}")
+            return False
+
 class EmailProvider(NotificationProvider):
     """邮件推送渠道"""
     MAX_BYTES = 0  # 无限制
@@ -1965,6 +2096,24 @@ def run_all_accounts():
             logger.info("Configuring DingTalk provider...")
             notification_manager.add_provider(DingTalkProvider(dingtalk_token, dingtalk_secret))
             
+        # 注册 Bark（iOS 推送）
+        bark_key = os.getenv("BARK_KEY")
+        if bark_key:
+            logger.info("Configuring Bark provider...")
+            bark_level = (os.getenv("BARK_LEVEL") or "").strip() or None
+            if bark_level and bark_level not in ("active", "timeSensitive", "passive", "critical"):
+                logger.warning(f"无效的 BARK_LEVEL '{bark_level}'，将使用 Bark 默认值")
+                bark_level = None
+            notification_manager.add_provider(BarkProvider(
+                bark_key,
+                server=os.getenv("BARK_SERVER"),
+                group=(os.getenv("BARK_GROUP") or "").strip() or None,
+                level=bark_level,
+                sound=(os.getenv("BARK_SOUND") or "").strip() or None,
+                icon=(os.getenv("BARK_ICON") or "").strip() or None,
+                click_url=(os.getenv("BARK_URL") or "").strip() or None,
+            ))
+
         # 注册 Email
         smtp_host = os.getenv("SMTP_HOST")
         smtp_port = os.getenv("SMTP_PORT")
