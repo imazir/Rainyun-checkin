@@ -392,3 +392,169 @@ GitHub 对 Fork 仓库的定时任务有限制，需要手动激活：
 > - ⚠️ 本项目仅供技术交流与学习参考，请严格遵守相关法律法规，切勿将其用于任何商业或非法用途。
 > - 🚫 将本项目分享到任何雨云官方相关讨论社区/群组是极其不明智的行为，请不要这么做！
 > - 💡 开源不易，在您进行分发、搬运或二次开源时，请务必保留原项目出处及致谢信息，感谢您的理解与尊重！
+
+---
+
+## 🚀 GitHub Actions 部署指南（安全加固版）
+
+> 本节由安全审查后追加，与上游文档并列。**按本节操作即可完成部署，且已规避下列已知风险。**
+
+### 一、部署前必读：三项风险与对应处置
+
+| 风险 | 说明 | 本仓库已做的处置 |
+| --- | --- | --- |
+| **账号密码经免费代理转发** | Actions 位于海外，直连 `app.rainyun.com` 会被拒；脚本会**自动抓取公开免费代理**，登录密码将经过来源不明的第三方节点 | 新增 `ENABLE_FREE_PROXY` 开关。默认仍为 `true`（保证开箱即用）；**强烈建议**配置 `PROXY_API_URL` 后设为 `false`，见第 3.4 节 |
+| **凭据落入仓库/日志** | 工作流输入框、日志、截图、验证码调试样本都可能含敏感信息 | 已移除 `workflow_dispatch` 的账号密码输入框；`.gitignore` 补充忽略 `logs/`；日志仅失败时上传且保留 3 天 |
+| **第三方 Action 供应链投毒** | `uses: owner/repo@v4` 的 tag 可被移动指向恶意提交 | 所有 Action **固定到 commit SHA**，并加 `permissions: contents: read` 收窄令牌权限 |
+
+### 二、Fork 并启用
+
+1. 打开 <https://github.com/LeapYa/Rainyun-Qiandao>，点右上角 **Fork** → **Create fork**。
+2. **强烈建议**取消勾选 "Copy the `main` branch only"，改为只保留默认分支即可；Fork 完成后进入自己仓库。
+3. 把本仓库已加固的 `.github/workflows/` 与 `rainyun.py` 覆盖上去（或直接使用已加固版本作为你的仓库）。
+4. 进入 **Actions** 标签页 → 点击 **I understand my workflows, go ahead and enable**。
+
+> Fork 仓库的 `schedule` 默认不激活，**必须先手动跑一次**才会开始定时。
+
+### 三、配置 Secrets
+
+进入仓库 **Settings → Secrets and variables → Actions → New repository secret**，按下表逐个添加。
+
+#### 3.1 必填
+
+| Name | Value |
+| --- | --- |
+| `RAINYUN_USERNAME` | 雨云账号（邮箱）。多账号用 `|` 分隔 |
+| `RAINYUN_PASSWORD` | 对应密码。多账号用 `|` 分隔，顺序需与账号一一对应 |
+
+> ⚠️ **务必使用小号**。该密码以明文存放，一旦泄露，攻击者可登录雨云控制台操作你的服务器、域名与余额。
+
+#### 3.2 通知渠道（可选，至少配一个才会收到推送）
+
+任选其一即可，推荐 **PushPlus**（配置最简单）：
+
+| Name | Value |
+| --- | --- |
+| `PUSHPLUS_TOKEN` | <http://www.pushplus.plus/> 的 token |
+
+其他渠道按需添加：`WXPUSHER_APP_TOKEN` / `WXPUSHER_UIDS` / `WXPUSHER_TOPIC_IDS`、`DINGTALK_ACCESS_TOKEN` / `DINGTALK_SECRET`、`SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_TO`。
+
+#### 3.3 测试账号工作流（可选）
+
+若你保留了 `test-checkin.yml`，需额外添加 `RAINYUN_TEST_USERNAME` / `RAINYUN_TEST_PASSWORD`；**不需要就删掉该文件**。
+
+#### 3.4 可信代理（强烈建议）
+
+| Name | Value |
+| --- | --- |
+| `PROXY_API_URL` | 你自己的代理接口地址，每次请求返回一个国内 IP，格式见 `.env.example` |
+
+配置后在 `.github/workflows/daily-checkin.yml` 中把
+
+```yaml
+ENABLE_FREE_PROXY: 'true'
+```
+
+改为 `'false'`。此时脚本**只走你自己的代理**，不再从公开代理站抓 IP，密码不会经过陌生节点。
+
+> 若暂时没有可信代理，保持 `'true'` 也能跑通（脚本会自动找可用免费代理并重试 3 次），但请知悉其代价。
+
+### 四、触发与验证
+
+1. 进入 **Actions → 雨云每日签到 → Run workflow → Run workflow**（分支选 `main`）。
+2. 点进这次运行，展开 **执行签到** 步骤查看日志。
+3. **成功标志**：日志出现 `签到任务执行成功！` 且进程退出码为 0。
+4. **失败排查**：
+   - `未配置雨云账号密码` → Secrets 名称写错或为空。
+   - `账号或密码错误` → 先去 <https://app.rainyun.com/auth/login> 手动登录验证。
+   - `代理过慢导致登录超时` → 免费代理质量差，重跑一次（每次抓到的代理不同），或配置 `PROXY_API_URL`。
+   - 找不到元素 / `TimeoutException` → 页面渲染慢，可在工作流中把 `TIMEOUT` 调大。
+5. 手动跑通后，定时任务即生效：**每天北京时间 06:45**（UTC 22:45）自动执行。
+
+### 五、运行后的安全收尾
+
+- **关闭无关工作流**：不用 `test-checkin.yml` 就删除，减少凭据暴露面。
+- **定期轮换密码**：若怀疑泄露，立即在雨云后台改密，并同步更新 Secret。
+- **不要外发 `logs/` 与 `temp/`**：调试包内含验证码样本与登录后页面截图。
+- **确认 `.env` 未被提交**：`.gitignore` 已忽略，切勿使用 `git add -f` 强加。
+- **降低留存**：`SCREENSHOT_MODE` 可设为 `none`，日志与推送中将不含截图。
+- **遵守规则**：本工具自动破解验证码并规避风控，**存在账号被限制的风险**，且可能违反雨云用户协议，请自行评估。
+
+### 六、本地改动清单（相对上游）
+
+| 文件 | 改动 |
+| --- | --- |
+| `rainyun.py` | PushPlus 推送由 `http://` 改为 `https://`；新增 `ENABLE_FREE_PROXY` 开关控制是否自动使用公开免费代理；**新增 `BarkProvider` 推送渠道**（含 APNs 4096 字节上限自适应裁剪） |
+| `.env.example` | 新增 Bark 配置段（`BARK_KEY` / `BARK_SERVER` / `BARK_GROUP` / `BARK_LEVEL` / `BARK_SOUND` / `BARK_ICON` / `BARK_URL`） |
+| `.gitignore` | 新增忽略 `logs/`（验证码调试样本、日志） |
+| `.github/workflows/daily-checkin.yml` | Action 固定 SHA；`permissions: contents: read`；移除 push 触发与账号密码输入框；新增 `concurrency`、`timeout-minutes`；`persist-credentials: false`；日志仅失败时上传 |
+| `.github/workflows/test-checkin.yml` | 同上（Action 固定 SHA、收窄权限、移除输入框） |
+| `.github/workflows/*.yml` | 新增 Bark 相关环境变量透传 |
+
+---
+
+## 📱 使用 Bark 推送（iOS）
+
+Bark 走 APNs，不需要注册第三方账号，**复制一串 key 就能用**，是目前最省事的推送渠道。
+
+### 一、拿到你的 BARK_KEY
+
+1. App Store 搜索安装 **Bark**（免费，作者 Finb）
+2. 打开 App，首页会显示一条测试推送的 URL，形如：
+   ```
+   https://api.day.app/AbCdEf123456/推送内容
+   ```
+3. 其中 `AbCdEf123456` 就是你的 **device key**（等同推送凭证，请勿公开）
+
+### 二、配置 Secrets / 环境变量
+
+**必填（1 个）：**
+
+| Name | Value |
+| --- | --- |
+| `BARK_KEY` | 你的 device key，**也可以直接粘贴 App 里复制的完整 URL**（程序会自动解析出服务器与 key） |
+
+**可选：**
+
+| Name | 说明 | 示例 |
+| --- | --- | --- |
+| `BARK_SERVER` | 自建服务器地址，留空则用官方 | `https://bark.example.com` |
+| `BARK_GROUP` | 推送分组，通知中心可按组查看 | `雨云签到` |
+| `BARK_LEVEL` | `active`(默认) / `timeSensitive`(专注模式也提醒) / `passive`(静默) / `critical`(重要警告) | `timeSensitive` |
+| `BARK_SOUND` | 自定义铃声 | `alarm` |
+| `BARK_ICON` | 自定义图标 URL（仅 iOS 15+） | `https://day.app/assets/images/avatar.jpg` |
+| `BARK_URL` | 点击推送后跳转的地址 | `https://app.rainyun.com/account/reward/earn` |
+
+> GitHub Actions 用户：在 **Settings → Secrets and variables → Actions** 中添加同名 Secret 即可，工作流已自动透传这 7 个变量。
+
+### 三、本机验证（可选）
+
+改完配置想先确认推送通不通，可绕过签到直接测：
+
+```bash
+python -c "import os; from rainyun import BarkProvider, setup_logging; setup_logging(); \
+BarkProvider(os.environ['BARK_KEY'], group=os.getenv('BARK_GROUP'), level='timeSensitive') \
+.send('雨云签到测试', {'summary_markdown': '如果你收到这条，说明 Bark 配置成功 ✅'})"
+```
+
+### 四、与其它渠道的差异
+
+| 项目 | 说明 |
+| --- | --- |
+| **消息格式** | 发送 `markdown_full`（完整报告），超长时自动降级 `markdown_lite` → `summary_markdown` |
+| **长度上限** | **APNs 硬上限 4096 字节**（`bark-server` 中 `PayloadMaximum = 4096`）。程序按**整包体积**动态裁剪正文（2400/1800/1200/800/400 逐档收缩），宁可少发也不会整条被拒收 |
+| **图片** | Bark 不支持在通知里嵌图，因此**截图不会推送**。需要看图请用 PushPlus / 邮件渠道 |
+| **安全** | `BARK_KEY` 等同推送凭证，日志中只打印 `AbCd***56` 形式；若 `BARK_SERVER` 使用 `http://`，程序会告警提示明文风险 |
+
+### 五、常见问题
+
+**Q: 日志显示 `Bark notification failed: HTTP 400 device token is invalid`？**
+`BARK_KEY` 填错了。注意别把 App 里那条完整 URL 的 `/推送内容` 部分一起复制进来——不过即使复制了完整 URL 也能正常工作，程序会自动取最后一段作为 key。请确认 key 来自「测试推送」那条 URL。
+
+**Q: 收到推送但内容被截断了？**
+APNs 单条上限 4096 字节，属正常降级。日志中会有 `Bark: 推送内容超出 APNs 上限，正文已压缩到 xxx 字节以内`。想看得更全可改用 PushPlus 或邮件。
+
+**Q: 想连截图一起收到？**
+Bark 不支持。可同时配置 PushPlus / 邮件渠道，两边并行推送。
+
+
