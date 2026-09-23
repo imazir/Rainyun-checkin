@@ -234,7 +234,7 @@ class PushPlusProvider(NotificationProvider):
 
     def send(self, title, context):
         import requests
-        url = 'http://www.pushplus.plus/send'
+        url = 'https://www.pushplus.plus/send'
 
         # 第一轮：按会员限额（10 万字）选择内容
         content = self.select_content(context)
@@ -1538,7 +1538,7 @@ def generate_summary_report(results, fmt='html'):
 def send_pushplus_notification(token, title, content):
     """发送 PushPlus 通知"""
     import requests
-    url = 'http://www.pushplus.plus/send'
+    url = 'https://www.pushplus.plus/send'
     data = {
         "token": token,
         "title": title,
@@ -2638,7 +2638,14 @@ def run_checkin(account_user=None, account_pwd=None, reuse_proxy=None, failed_pr
             # 被拦截时自动抓取国内免费代理绕过（覆盖 GitHub Actions、海外 VPS、Docker 等）。
             # 重试时优先复用上次的代理：换 IP 会导致服务器 Cookie 失效，
             # 进而被迫走密码登录，而慢代理下密码登录容易超时失败。
-            if reuse_proxy:
+            if os.getenv("ENABLE_FREE_PROXY", "true").strip().lower() in ("false", "0", "no", "off"):
+                # 安全开关：免费公开代理不可信（IP 归属不明、可能被用于流量分析），
+                # 且频繁更换出口 IP 容易触发雨云风控。设为 false 后必须自行配置 PROXY_API_URL。
+                logger_adapter.warning(
+                    "直连 app.rainyun.com 被拦截，但 ENABLE_FREE_PROXY 已禁用自动免费代理，"
+                    "将直连重试（大概率失败）。建议配置 PROXY_API_URL 使用可信代理。"
+                )
+            elif reuse_proxy:
                 if validate_proxy(reuse_proxy):
                     proxy = reuse_proxy
                     logger_adapter.info(f"复用上次代理: {proxy}（避免换 IP 导致 Cookie 失效）")
