@@ -72,6 +72,7 @@ jobs:
           RAINYUN_USERNAME: ${{ secrets.RAINYUN_USERNAME }}
           RAINYUN_PASSWORD: ${{ secrets.RAINYUN_PASSWORD }}
           # ---- 通知渠道（可选，至少配一个才会收到推送）----
+          BARK_KEY: ${{ secrets.BARK_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
           WXPUSHER_UIDS: ${{ secrets.WXPUSHER_UIDS }}
